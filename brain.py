@@ -71,7 +71,7 @@ async def generate(chat_id: int, allow_skip: bool, target: str) -> str | None:
         banned = repeated_phrases(memory.viki_replies(chat_id))
         avoid = (f"\nты уже затёрла эти обороты, не используй их и похожие: "
                  f"{', '.join(banned)}.") if banned else ""
-        is_owner = "[твой парень]" in target
+        is_owner = "['статус']" in target
 
         user_msg = (
             "последние сообщения чата:\n"
