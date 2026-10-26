@@ -7,7 +7,10 @@ from collections import defaultdict, Counter
 from pathlib import Path
 
 import memory
-from config import COOLDOWN, RANDOM_CHANCE
+from config import (
+    COOLDOWN, RANDOM_CHANCE, TIMERS_ENABLED,
+    TIMER_MIN_MINUTES, TIMER_MAX_MINUTES,
+)
 
 log = logging.getLogger(__name__)
 from llm import complete
@@ -64,7 +67,45 @@ def repeated_phrases(replies: list[str], limit: int = 6) -> list[str]:
     return [g for g, k in c.most_common() if k >= 2][:limit]
 
 
-async def generate(chat_id: int, allow_skip: bool, target: str) -> str | None:
+# ии сама ставит таймер, дописывая в конец ответа тег вида [timer:60|коротко о чём договорились]
+TIMER_RE = re.compile(r"\[timer:\s*(\d+)\s*\|([^\]]*)\]", re.IGNORECASE)
+
+TIMER_HINT = (
+    "\nесли собеседник говорит, что сейчас занят или уходит и сам напишет или вернётся "
+    "позже (через час, вечером и тд), добавь после реплики отдельной последней строкой "
+    "тег [timer:минуты|коротко, о чём договорились]. минуты считай от текущего момента "
+    "(через час = 60). в остальных случаях тег не добавляй."
+)
+
+
+def _split_timer(text: str) -> tuple[str, tuple[int, str] | None]:
+    """вырезает тег таймера из ответа, возвращает (текст без тега, (минуты, заметка) | None)"""
+    m = TIMER_RE.search(text)
+    if not m:
+        return text, None
+    minutes = min(max(int(m.group(1)), TIMER_MIN_MINUTES), TIMER_MAX_MINUTES)
+    note = m.group(2).strip() or "договорились, что напишет позже"
+    return TIMER_RE.sub("", text).strip(), (minutes, note)
+
+
+def _to_parts(text: str) -> list[str]:
+    text = text.strip().lower()
+    parts = [p.removeprefix("имя ии:").strip() for p in text.split("\n")]
+    parts = [p for p in parts if p]
+    if len(parts) > 3:                       # лишнее клеим в третье, чтобы не терять
+        parts = parts[:2] + [" ".join(parts[2:])]
+    return parts
+
+
+async def _commit_reply(chat_id: int, parts: list[str]):
+    for p in parts:                          # в истории каждое сообщение отдельной строкой
+        await memory.add(chat_id, "имя ии", p)
+    _last_reply[chat_id] = time.time()
+    _since_reply[chat_id] = 0
+
+
+async def generate(chat_id: int, allow_skip: bool, target: str,
+                   author: str | None = None) -> list[str] | None:
     async with _locks[chat_id]:   # не отвечаем дважды параллельно
         tail = ("\nесли добавить нечего или сообщение не к тебе, "
                 "ответь ровно SKIP.") if allow_skip else ""
@@ -72,6 +113,7 @@ async def generate(chat_id: int, allow_skip: bool, target: str) -> str | None:
         avoid = (f"\nты уже затёрла эти обороты, не используй их и похожие: "
                  f"{', '.join(banned)}.") if banned else ""
         is_owner = "['статус']" in target
+        timer_hint = TIMER_HINT if (TIMERS_ENABLED and author) else ""
 
         user_msg = (
             "последние сообщения чата:\n"
@@ -79,7 +121,7 @@ async def generate(chat_id: int, allow_skip: bool, target: str) -> str | None:
             f"отвечай на последнее сообщение: {target}\n"
             "напиши следующую реплику 'имя ии' (только текст, без имени и двоеточия)."
             f"\nнастрой этой реплики: {pick_mode(is_owner)}."
-            f"{avoid}{tail}"
+            f"{avoid}{tail}{timer_hint}"
         )
         text = await complete([
             {"role": "system", "content": PERSONA},   # статичный префикс -> кэш
@@ -89,16 +131,50 @@ async def generate(chat_id: int, allow_skip: bool, target: str) -> str | None:
             log.info("skip в чате %s (llm решила промолчать)", chat_id)
             return None
 
-        text = text.strip().lower()
-        parts = [p.removeprefix("имя ии:").strip() for p in text.split("\n")]
-        parts = [p for p in parts if p]
+        timer = None
+        if timer_hint:
+            text, timer = _split_timer(text)
+        if timer:
+            minutes, note = timer
+            await memory.set_timer(chat_id, author, note, time.time() + minutes * 60)
+            log.info("таймер в чате %s: %s через %s мин (%s)", chat_id, author, minutes, note)
+
+        parts = _to_parts(text)
         if not parts:
             return None
-        if len(parts) > 3:                       # лишнее клеим в третье, чтобы не терять
-            parts = parts[:2] + [" ".join(parts[2:])]
+        await _commit_reply(chat_id, parts)
+        return parts
 
-        for p in parts:                          # в истории каждое сообщение отдельной строкой
-            await memory.add(chat_id, "имя ии", p)
-        _last_reply[chat_id] = time.time()
-        _since_reply[chat_id] = 0
+
+async def generate_nudge(chat_id: int, author: str, note: str) -> list[str] | None:
+    """сообщение по истечении таймера: ии пишет первой, опираясь на контекст чата"""
+    async with _locks[chat_id]:
+        banned = repeated_phrases(memory.viki_replies(chat_id))
+        avoid = (f"\nты уже затёрла эти обороты, не используй их и похожие: "
+                 f"{', '.join(banned)}.") if banned else ""
+        is_owner = "['статус']" in author
+
+        user_msg = (
+            "последние сообщения чата:\n"
+            f"{memory.get_log(chat_id)}\n\n"
+            f"ранее вы договорились: {author} - {note}. время вышло, "
+            f"теперь ты сама пишешь первой, учитывая контекст.\n"
+            "напиши следующую реплику 'имя ии' (только текст, без имени и двоеточия)."
+            f"\nнастрой этой реплики: {pick_mode(is_owner)}."
+            f"{avoid}"
+            "\nесли человек уже вернулся и тема закрыта или писать нет смысла, "
+            "ответь ровно SKIP."
+        )
+        text = await complete([
+            {"role": "system", "content": PERSONA},
+            {"role": "user", "content": user_msg},
+        ])
+        if not text or text.strip().upper().startswith("SKIP"):
+            log.info("skip по таймеру в чате %s", chat_id)
+            return None
+
+        parts = _to_parts(TIMER_RE.sub("", text))   # на всякий случай, если ии всё равно дописала тег
+        if not parts:
+            return None
+        await _commit_reply(chat_id, parts)
         return parts

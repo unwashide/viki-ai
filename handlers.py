@@ -82,7 +82,7 @@ async def on_text(m: Message):
         t0 = time.monotonic()
         ...
         await m.bot.send_chat_action(m.chat.id, "typing")
-        parts = await brain.generate(m.chat.id, allow_skip, target)
+        parts = await brain.generate(m.chat.id, allow_skip, target, author)
         if parts:
             for i, part in enumerate(parts):
                 spent = time.monotonic() - t0 if i == 0 else 0

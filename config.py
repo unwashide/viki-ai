@@ -19,3 +19,10 @@ DB_PATH = "name_ai.db"       # если надо поменять названи
 OWNER_ID = int(os.environ["OWNER_ID"])
 ALLOWED_CHATS = {int(x) for x in os.environ["ALLOWED_CHATS"].split(",")}
 MAX_INPUT_LEN = 500
+
+# таймеры: ии сама решает, когда поставить (человек сказал "напишу позже")
+TIMERS_ENABLED = True
+TIMER_POLL = 20             # как часто (сек) проверять, не пора ли писать
+TIMER_MIN_MINUTES = 1       # минимум, на сколько можно поставить таймер
+TIMER_MAX_MINUTES = 1440    # максимум (сутки), всё что больше обрезается
+TIMER_MAX_LATE = 3 * 3600   # если бот был выключен и таймер просрочен дольше этого, молча выкидываем
