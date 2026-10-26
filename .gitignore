@@ -1,0 +1,5 @@
+.env
+viki.db
+viki.db-journal
+__pycache__/
+*.pyc
