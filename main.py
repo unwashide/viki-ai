@@ -2,10 +2,11 @@
 import asyncio
 import logging
 import memory
+import scheduler
 
 from aiogram import Bot, Dispatcher
 
-from config import TG_TOKEN
+from config import TG_TOKEN, TIMERS_ENABLED
 from handlers import router
 
 
@@ -23,9 +24,12 @@ async def main():
     # иначе ваша ии после рестарта начнёт отвечать на вчерашний чат
     await bot.delete_webhook(drop_pending_updates=True)
     await memory.init()
+    timers = asyncio.create_task(scheduler.run(bot)) if TIMERS_ENABLED else None
     try:
         await dp.start_polling(bot)
     finally:
+        if timers:
+            timers.cancel()
         await memory.close()
         await bot.session.close()
 

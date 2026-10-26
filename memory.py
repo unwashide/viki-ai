@@ -21,6 +21,17 @@ async def init():
         )"""
     )
     await _db.execute("create index if not exists idx_chat on messages(chat_id, id)")
+    await _db.execute(
+        """create table if not exists timers (
+            id integer primary key autoincrement,
+            chat_id integer not null,
+            author text not null,
+            note text not null,
+            due_ts real not null,
+            done integer not null default 0
+        )"""
+    )
+    await _db.execute("create index if not exists idx_timers_due on timers(done, due_ts)")
     await _db.commit()
 
     async with _db.execute(
@@ -60,4 +71,33 @@ def get_log(chat_id: int) -> str:
 async def clear(chat_id: int):
     _history[chat_id].clear()
     await _db.execute("delete from messages where chat_id = ?", (chat_id,))
+    await _db.execute("delete from timers where chat_id = ?", (chat_id,))
+    await _db.commit()
+
+
+async def set_timer(chat_id: int, author: str, note: str, due_ts: float):
+    """один активный таймер на человека в чате: новый заменяет старый"""
+    await _db.execute(
+        "delete from timers where chat_id = ? and author = ? and done = 0",
+        (chat_id, author),
+    )
+    await _db.execute(
+        "insert into timers (chat_id, author, note, due_ts) values (?, ?, ?, ?)",
+        (chat_id, author, note, due_ts),
+    )
+    await _db.commit()
+
+
+async def due_timers(now: float) -> list[tuple[int, int, str, str, float]]:
+    """таймеры, у которых время вышло: (id, chat_id, author, note, due_ts)"""
+    async with _db.execute(
+        "select id, chat_id, author, note, due_ts from timers "
+        "where done = 0 and due_ts <= ? order by due_ts",
+        (now,),
+    ) as cur:
+        return await cur.fetchall()
+
+
+async def finish_timer(timer_id: int):
+    await _db.execute("update timers set done = 1 where id = ?", (timer_id,))
     await _db.commit()
